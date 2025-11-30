@@ -1,53 +1,80 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { RotateCcw, RotateCw, Settings, Zap } from 'lucide-react';
+import { RotateCcw, RotateCw, Settings, Zap, Bluetooth, BluetoothConnected, BluetoothOff, Gamepad2, Hand } from 'lucide-react';
 
-// IMPORTANT: Replace this with the actual IP address of your ESP32 AP
-const ROBOT_BASE_URL = "http://192.168.4.1";
+// --- BLE Configuration ---
+const SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb";
+const CHARACTERISTIC_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb";
 
 // --- Joystick Configuration ---
-const JOYSTICK_RADIUS = 120; // Radius of the outer ring in pixels
+const JOYSTICK_RADIUS = 80; // Reduced radius to fit two joysticks
 
 /**
- * Custom hook for sending continuous motion commands to the /move endpoint.
+ * Reusable hook for managing a Bluetooth connection.
  */
-const useMoveCommandSender = () => {
-  const [vx, setVx] = useState(0);
-  const [vy, setVy] = useState(0);
+const useBluetoothController = (deviceName) => {
+  const [device, setDevice] = useState(null);
+  const [characteristic, setCharacteristic] = useState(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const [error, setError] = useState(null);
 
-  // Debounced effect to send the latest VX/VY
-  useEffect(() => {
-    // If the robot should be stopped (Vx/Vy are near zero), send the stop command immediately
-    if (Math.abs(vx) < 0.05 && Math.abs(vy) < 0.05) {
-      fetch(`${ROBOT_BASE_URL}/move?vx=0&vy=0`)
-        .catch(err => console.error('Stop error:', err));
-      return; 
+  const connect = async () => {
+    try {
+      setError(null);
+      const device = await navigator.bluetooth.requestDevice({
+        filters: [{ name: deviceName }],
+        optionalServices: [SERVICE_UUID]
+      });
+
+      const server = await device.gatt.connect();
+      const service = await server.getPrimaryService(SERVICE_UUID);
+      const char = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+      device.addEventListener('gattserverdisconnected', onDisconnected);
+
+      setDevice(device);
+      setCharacteristic(char);
+      setIsConnected(true);
+      console.log(`Connected to ${deviceName}`);
+    } catch (err) {
+      console.error(`Connection to ${deviceName} failed`, err);
+      setError(err.message);
     }
+  };
 
-    // Send the command on a recurring interval (50ms) for smooth movement
-    const interval = setInterval(() => {
-      fetch(`${ROBOT_BASE_URL}/move?vx=${vx.toFixed(3)}&vy=${vy.toFixed(3)}`)
-        .catch(err => console.error('Move error:', err));
-    }, 50); 
+  const disconnect = () => {
+    if (device && device.gatt.connected) {
+      device.gatt.disconnect();
+    }
+  };
 
-    return () => clearInterval(interval); // Cleanup on unmount or dependency change
-  }, [vx, vy]); 
-  
-  const setVelocity = useCallback((newVx, newVy) => {
-    setVx(newVx);
-    setVy(newVy);
-  }, []);
+  const onDisconnected = () => {
+    console.log(`Device ${deviceName} disconnected`);
+    setIsConnected(false);
+    setDevice(null);
+    setCharacteristic(null);
+  };
 
-  return setVelocity;
+  const sendCommand = useCallback(async (cmd) => {
+    if (!characteristic) return;
+    try {
+      const encoder = new TextEncoder();
+      await characteristic.writeValue(encoder.encode(cmd));
+    } catch (err) {
+      console.error(`Send error to ${deviceName}:`, err);
+    }
+  }, [characteristic, deviceName]);
+
+  return { connect, disconnect, isConnected, sendCommand, error };
 };
 
 // Component for the Drag Joystick
-const Joystick = ({ setVelocity }) => {
+const Joystick = ({ setVelocity, label, color = "cyan", sticky = false }) => {
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const containerRef = useRef(null);
-  
+
   const handleMove = useCallback((clientX, clientY) => {
-    if (!isDragging || !containerRef.current) return;
+    if (!isDragging && !containerRef.current) return; // Only move if dragging or if it's a sticky joystick and we're initiating a click/touch
 
     const rect = containerRef.current.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
@@ -61,16 +88,16 @@ const Joystick = ({ setVelocity }) => {
     if (r > JOYSTICK_RADIUS) {
       x = (x / r) * JOYSTICK_RADIUS;
       y = (y / r) * JOYSTICK_RADIUS;
-      r = JOYSTICK_RADIUS; 
+      r = JOYSTICK_RADIUS;
     }
 
     setPosition({ x, y });
 
-    // Y-axis is inverted for robots: pulling down (positive Y pixel) is forward (positive Vy velocity)
-    const normalizedVx = x / JOYSTICK_RADIUS;
-    const normalizedVy = -y / JOYSTICK_RADIUS; 
+    // Normalize to -1.0 to 1.0
+    const normalizedX = x / JOYSTICK_RADIUS;
+    const normalizedY = -y / JOYSTICK_RADIUS; // Invert Y
 
-    setVelocity(normalizedVx, normalizedVy);
+    setVelocity(normalizedX, normalizedY);
   }, [isDragging, setVelocity]);
 
   const handleDragStart = useCallback((e) => {
@@ -84,9 +111,11 @@ const Joystick = ({ setVelocity }) => {
 
   const handleDragEnd = useCallback(() => {
     setIsDragging(false);
-    setPosition({ x: 0, y: 0 });
-    setVelocity(0, 0); 
-  }, [setVelocity]);
+    if (!sticky) {
+      setPosition({ x: 0, y: 0 });
+      setVelocity(0, 0);
+    }
+  }, [setVelocity, sticky]);
 
   // Global mouse/touch move listeners
   useEffect(() => {
@@ -110,151 +139,301 @@ const Joystick = ({ setVelocity }) => {
     };
   }, [isDragging, handleMove, handleDragEnd]);
 
-  // Calculate speed percentage for display
-  const distance = Math.sqrt(position.x * position.x + position.y * position.y);
-  const speedPercent = Math.round((distance / JOYSTICK_RADIUS) * 100);
+  const borderColor = color === "cyan" ? "border-cyan-400/50" : "border-purple-400/50";
+  const knobColor = color === "cyan" ? "bg-cyan-500/90" : "bg-purple-500/90";
 
   return (
     <div className="flex flex-col items-center">
-        <div 
-          ref={containerRef}
-          className="relative rounded-full border-4 border-gray-400/80 
-                     bg-gray-800/80 cursor-pointer touch-none"
-          style={{ width: JOYSTICK_RADIUS * 2, height: JOYSTICK_RADIUS * 2 }}
-          onMouseDown={handleDragStart}
-          onTouchStart={handleDragStart}
+      <div className="mb-2 text-gray-400 font-bold text-sm tracking-wider">{label}</div>
+      <div
+        ref={containerRef}
+        className={`relative rounded-full border-4 ${borderColor}
+                     bg-gray-800/80 cursor-pointer touch-none shadow-inner shadow-black/50`}
+        style={{ width: JOYSTICK_RADIUS * 2, height: JOYSTICK_RADIUS * 2 }}
+        onMouseDown={handleDragStart}
+        onTouchStart={handleDragStart}
+      >
+        {/* Draggable Knob */}
+        <div
+          className={`absolute rounded-full w-12 h-12 ${knobColor} shadow-lg shadow-black/50 border-2 border-white/30 transition-all duration-75 ease-linear`}
+          style={{
+            transform: `translate(${position.x - 24}px, ${position.y - 24}px)`,
+            top: '50%',
+            left: '50%',
+          }}
         >
-          
-          {/* Crosshair: Vertical Line */}
-          <div className="absolute inset-y-0 left-1/2 w-0.5 transform -translate-x-1/2 bg-gray-400/70"></div>
-          {/* Crosshair: Horizontal Line */}
-          <div className="absolute inset-x-0 top-1/2 h-0.5 transform -translate-y-1/2 bg-gray-400/70"></div>
-          
-          {/* Center Dot (Inner Circle) - Fixed */}
-          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 
-                          w-12 h-12 rounded-full border-2 border-gray-300/50 bg-gray-700/60 shadow-inner">
-          </div>
-
-          {/* Draggable Knob */}
-          <div
-            className="absolute rounded-full w-16 h-16 bg-gray-500/90 shadow-lg shadow-gray-700/50 border-2 border-white/50 transition-all duration-100 ease-linear"
-            style={{
-              transform: `translate(${position.x - 32}px, ${position.y - 32}px)`, // 32px is half of 64px knob size
-              top: '50%',
-              left: '50%',
-            }}
-          >
-          </div>
         </div>
-
-        {/* Speed Display */}
-        <div className="mt-8 p-4 w-full text-center bg-gray-900/50 rounded-xl shadow-lg shadow-black/30 border border-gray-700/50">
-          <label className="flex items-center justify-center text-xl font-semibold text-gray-300 mb-3">
-            <Zap className="mr-2 h-5 w-5 text-cyan-400" />
-            Throttle: <span id="speedValue" className="ml-2 text-cyan-400">{speedPercent}%</span>
-          </label>
-          <div className="relative h-4 bg-gray-700 rounded-full overflow-hidden">
-            <div 
-              className="absolute left-0 top-0 h-full bg-gradient-to-r from-cyan-400 to-teal-500 transition-all duration-100 ease-linear"
-              style={{ width: `${speedPercent}%` }}
-            ></div>
-          </div>
-        </div>
+      </div>
     </div>
   );
 };
 
-
 // --- App Component ---
 export default function App() {
-  const setVelocity = useMoveCommandSender();
-  const sendCommand = useCallback((cmd) => {
-    fetch(`${ROBOT_BASE_URL}/control?cmd=${cmd}`)
-        .catch(err => console.error('Rotation command error:', err));
-  }, []);
-  
+  // --- Base Controller ---
+  const baseBle = useBluetoothController('MecanumRobot');
+  const [baseVx, setBaseVx] = useState(0);
+  const [baseVy, setBaseVy] = useState(0);
   const [rotationSpeed, setRotationSpeed] = useState(200);
+
+  // --- Arm Controller ---
+  const armBle = useBluetoothController('MecanumArm');
+  const [armBase, setArmBase] = useState(90);
+  const [armExtension, setArmExtension] = useState(0); // 0 = Home (Folded), 100 = Extended (Max)
+  const [armWrist, setArmWrist] = useState(110);
+  const [armGripper, setArmGripper] = useState(110); // 0 = Closed, 180 = Open (approx)
+  const [gripperAction, setGripperAction] = useState('idle'); // 'idle', 'opening', 'closing'
+
+  // Gripper Hold-to-Move Logic
+  useEffect(() => {
+    if (gripperAction === 'idle') return;
+
+    const interval = setInterval(() => {
+      setArmGripper(prev => {
+        const step = 2; // Speed: 2 degrees per 50ms
+        let next = prev;
+        if (gripperAction === 'opening') next += step;
+        if (gripperAction === 'closing') next -= step;
+        return Math.max(0, Math.min(110, next));
+      });
+    }, 50);
+
+    return () => clearInterval(interval);
+  }, [gripperAction]);
+
+  // Derived Angles for Display
+  // Home (0%): Shoulder 0 (UI) -> Servo 180, Elbow 180 (UI) -> Servo 180
+  // Max (100%): Shoulder 70 (UI) -> Servo 110, Elbow 70 (UI) -> Servo 70
+  const displayShoulder = (armExtension / 100) * 70;
+  // Elbow Range: 180 -> 70 (Span of 110 degrees)
+  const displayElbow = 180 - ((armExtension / 100) * 110);
+
+  // --- Base Logic ---
+  useEffect(() => {
+    if (!baseBle.isConnected) return;
+
+    if (Math.abs(baseVx) < 0.05 && Math.abs(baseVy) < 0.05) {
+      baseBle.sendCommand(`M:0:0`);
+      const stopInterval = setInterval(() => baseBle.sendCommand(`M:0:0`), 50);
+      const timeout = setTimeout(() => clearInterval(stopInterval), 500);
+      return () => { clearInterval(stopInterval); clearTimeout(timeout); };
+    }
+
+    const interval = setInterval(() => {
+      baseBle.sendCommand(`M:${baseVx.toFixed(3)}:${baseVy.toFixed(3)}`);
+    }, 50);
+
+    return () => clearInterval(interval);
+  }, [baseBle.isConnected, baseVx, baseVy, baseBle.sendCommand]);
 
   const updateRotationSpeed = (value) => {
     setRotationSpeed(value);
-    fetch(`${ROBOT_BASE_URL}/speed?value=${value}`)
-      .catch(err => console.error('Error setting rotation speed:', err));
+    if (baseBle.isConnected) baseBle.sendCommand(`S:${value}`);
   };
-  
-  const RotationSpeedSlider = () => (
-    <div className="mt-4 p-4 bg-gray-900/50 rounded-xl shadow-lg shadow-black/30 border border-gray-700/50">
-      <label className="flex items-center justify-center text-xl font-semibold text-gray-300 mb-3">
-        <RotateCw className="mr-2 h-5 w-5 text-teal-400" />
-        Rotation Speed: <span className="ml-2 text-cyan-400">{rotationSpeed}</span>
-      </label>
-      <input
-        type="range"
-        min="50"
-        max="255"
-        value={rotationSpeed}
-        onChange={(e) => updateRotationSpeed(parseInt(e.target.value, 10))}
-        className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer
-                   [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-5 [&::-webkit-slider-thumb]:w-5
-                   [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-cyan-400
-                   [&::-webkit-slider-thumb]:shadow-md [&::-webkit-slider-thumb]:shadow-cyan-400/50"
-      />
-      <div className="flex justify-between text-sm text-gray-400 mt-2 font-mono">
-        <span>SLOW (50)</span>
-        <span>FAST (255)</span>
-      </div>
-    </div>
-  );
-  
-  const RotationButton = ({ icon, command }) => {
-    const handleStart = () => sendCommand(command);
-    const handleStop = () => sendCommand('stop');
 
+  // --- Arm Logic ---
+  // State for Arm Joystick Velocity (not Angle)
+  const [armVx, setArmVx] = useState(0);
+  const [armVy, setArmVy] = useState(0);
+
+  // Refs for State Access inside Loop (to avoid restarting interval)
+  const stateRef = useRef({
+    armBase, armExtension, armWrist, armGripper, armVx, armVy
+  });
+
+  // Sync Refs with State
+  useEffect(() => {
+    stateRef.current = { armBase, armExtension, armWrist, armGripper, armVx, armVy };
+  }, [armBase, armExtension, armWrist, armGripper, armVx, armVy]);
+
+  // Main Control Loop (Runs once, doesn't restart on state changes)
+  useEffect(() => {
+    if (!armBle.isConnected) return;
+
+    const interval = setInterval(() => {
+      const { armBase, armExtension, armWrist, armGripper, armVx, armVy } = stateRef.current;
+
+      // Incremental Control with Variable Speed (Exponential Curve)
+      const MAX_SPEED = 8.0;
+      // Extension Speed: 0-100 scale. Let's say max speed is 5 units per tick.
+      const MAX_EXT_SPEED = 5.0;
+
+      if (Math.abs(armVx) > 0.05 || Math.abs(armVy) > 0.05) {
+        // Base Rotation (X-Axis)
+        const deltaBase = armVx * Math.abs(armVx) * MAX_SPEED;
+        setArmBase(prev => {
+          const next = prev + deltaBase;
+          return Math.max(0, Math.min(180, next));
+        });
+
+        // Arm Extension (Y-Axis) - Coupled Shoulder & Elbow
+        // Joystick UP (Negative armVy) -> Increase Extension (Move to Target)
+        // Joystick DOWN (Positive armVy) -> Decrease Extension (Move to Home)
+        const deltaExt = -armVy * Math.abs(armVy) * MAX_EXT_SPEED;
+
+        setArmExtension(prev => {
+          const next = prev + deltaExt;
+          return Math.max(0, Math.min(100, next));
+        });
+      }
+
+      // Calculate Servo Angles from Extension State
+      // 1. Shoulder: 0% -> 0 deg (UI), 100% -> 70 deg (UI)
+      //    Servo Mapping: 180 - UI Angle
+      const uiShoulder = (armExtension / 100) * 70;
+      const servoShoulder = 180 - Math.round(uiShoulder);
+
+      // 2. Elbow: 0% -> 180 deg (UI), 100% -> 70 deg (UI)
+      //    Range: 180 down to 70 (Span = 110)
+      //    Formula: 180 - (Percent * 110)
+      const uiElbow = 180 - ((armExtension / 100) * 110);
+      const servoElbow = Math.round(uiElbow);
+
+      // Send current angles to robot
+      const cmd = `A:${Math.round(armBase)}:${servoShoulder}:${servoElbow}:${armWrist}:${armGripper}`;
+      armBle.sendCommand(cmd);
+
+    }, 50); // 20Hz update rate
+
+    return () => clearInterval(interval);
+  }, [armBle.isConnected, armBle.sendCommand]); // Only restart if connection changes
+
+  // Handle Arm Joystick now sets Velocity, not Angle
+  const handleArmJoystick = (x, y) => {
+    setArmVx(x);
+    setArmVy(y);
+  };
+
+  const constrain = (val, min, max) => Math.min(Math.max(val, min, max));
+
+  const RotationButton = ({ icon, command }) => {
+    const handleStart = () => { if (baseBle.isConnected) baseBle.sendCommand(`C:${command}`); };
+    const handleStop = () => { if (baseBle.isConnected) baseBle.sendCommand('C:stop'); };
     return (
       <button
-        className="relative flex items-center justify-center p-3 sm:p-4 text-gray-200 text-3xl transition-all duration-200 ease-in-out
-                    rounded-full aspect-square bg-gray-700 hover:bg-gray-600 active:bg-gray-500
-                    shadow-md shadow-black/50 active:shadow-inner z-10 flex-1 h-20 w-full border border-gray-500"
-        onMouseDown={handleStart}
-        onMouseUp={handleStop}
-        onTouchStart={handleStart}
-        onTouchEnd={handleStop}
-        onMouseLeave={handleStop}
+        className={`p-4 rounded-full bg-gray-700 hover:bg-gray-600 active:bg-gray-500 shadow-lg transition-all
+                    ${!baseBle.isConnected ? 'opacity-50 cursor-not-allowed' : ''}`}
+        onMouseDown={handleStart} onMouseUp={handleStop}
+        onTouchStart={handleStart} onTouchEnd={handleStop}
+        disabled={!baseBle.isConnected}
       >
-        <span className="text-cyan-400">
-          {icon}
-        </span>
+        <span className="text-cyan-400">{icon}</span>
       </button>
     );
   };
 
-
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-950 p-4 font-sans text-gray-200">
-      <div className="max-w-md w-full bg-gray-900 p-6 md:p-8 rounded-3xl shadow-2xl shadow-black/50 border border-gray-700/50">
-        <h1 className="text-3xl md:text-4xl font-extrabold text-center text-gray-400 mb-6 flex items-center justify-center">
-          <Settings className="h-7 w-7 mr-2 text-teal-400" />
-          Mecanum Control Console
-        </h1>
-        <p className="text-center text-sm text-gray-500 mb-8 max-w-xs mx-auto">
-          Drag the knob to steer and accelerate omnidirectionally.
-        </p>
+    <div className="w-screen h-screen bg-gray-950 overflow-hidden flex flex-row items-center justify-between px-12 select-none touch-none">
 
-        {/* Draggable Joystick */}
-        <Joystick setVelocity={setVelocity} />
+      {/* LEFT: Base Joystick (Clean) */}
+      <div className="flex flex-col items-center justify-center w-1/4">
+        <Joystick
+          label="MOVE"
+          color="cyan"
+          setVelocity={(vx, vy) => { setBaseVx(vx); setBaseVy(vy); }}
+        />
+      </div>
 
-        {/* Rotation Buttons */}
-        <div className="flex justify-around mt-8 gap-4">
-          <RotationButton icon={<RotateCcw className="h-8 w-8" />} command="rotleft" />
-          <RotationButton icon={<RotateCw className="h-8 w-8" />} command="rotright" />
+      {/* CENTER: Controls & Status */}
+      <div className="flex flex-col items-center justify-center w-2/4 h-full py-6 gap-6">
+
+        {/* Top Row: Connections & Speed */}
+        <div className="flex items-center gap-6 w-full justify-center bg-gray-900/50 p-3 rounded-2xl border border-gray-800/50">
+          <button
+            onClick={baseBle.isConnected ? baseBle.disconnect : baseBle.connect}
+            className={`p-2 rounded-lg transition-all ${baseBle.isConnected ? 'bg-green-600/20 text-green-400' : 'bg-gray-800 text-gray-500'}`}
+          >
+            <Gamepad2 className="h-5 w-5" />
+          </button>
+
+          {/* Speed Slider */}
+          <div className="flex-1 max-w-[120px] flex items-center gap-2">
+            <Zap className="h-3 w-3 text-yellow-500" />
+            <input
+              type="range" min="50" max="255" value={rotationSpeed}
+              onChange={(e) => updateRotationSpeed(parseInt(e.target.value))}
+              className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-yellow-500"
+            />
+          </div>
+
+          <button
+            onClick={armBle.isConnected ? armBle.disconnect : armBle.connect}
+            className={`p-2 rounded-lg transition-all ${armBle.isConnected ? 'bg-purple-600/20 text-purple-400' : 'bg-gray-800 text-gray-500'}`}
+          >
+            <Hand className="h-5 w-5" />
+          </button>
         </div>
-        
-        <RotationSpeedSlider />
 
-        <div className="mt-8 text-center text-xs text-gray-600 font-mono">
-            <Settings className="inline h-3 w-3 mr-1 text-gray-700" />
-            STATUS: Connected to {ROBOT_BASE_URL}
+        {/* Middle: Wrist Slider */}
+        <div className="w-full max-w-sm bg-gray-900/50 p-4 rounded-2xl border border-gray-800/50">
+          <div className="flex justify-between text-xs text-gray-400 mb-2 font-mono tracking-wider">
+            <span>WRIST ANGLE</span>
+            <span>{armWrist}°</span>
+          </div>
+          <input
+            type="range" min="0" max="110" value={armWrist}
+            onChange={(e) => setArmWrist(parseInt(e.target.value))}
+            className="w-full h-6 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-400"
+          />
+        </div>
+
+        {/* Bottom: Rotation & Gripper */}
+        <div className="w-full max-w-sm flex gap-4">
+
+          {/* Rotation (Base - Left Side) */}
+          <div className="flex gap-2">
+            <div className="flex flex-col gap-2">
+              <RotationButton icon={<RotateCcw className="h-5 w-5" />} command="rotleft" />
+            </div>
+            <div className="flex flex-col gap-2">
+              <RotationButton icon={<RotateCw className="h-5 w-5" />} command="rotright" />
+            </div>
+          </div>
+
+          {/* Gripper (Arm - Right Side) */}
+          <div className="flex-1 flex gap-2">
+            <button
+              onMouseDown={() => setGripperAction('closing')}
+              onMouseUp={() => setGripperAction('idle')}
+              onMouseLeave={() => setGripperAction('idle')}
+              onTouchStart={() => setGripperAction('closing')}
+              onTouchEnd={() => setGripperAction('idle')}
+              className={`flex-1 py-4 rounded-xl font-bold text-sm transition-all active:scale-95 shadow-lg flex flex-col items-center justify-center gap-1
+                ${gripperAction === 'closing' ? 'bg-purple-500 text-white shadow-purple-500/50' : 'bg-gray-800 text-gray-400 border border-gray-700'}`}
+            >
+              <span>OPEN</span>
+            </button>
+            <button
+              onMouseDown={() => setGripperAction('opening')}
+              onMouseUp={() => setGripperAction('idle')}
+              onMouseLeave={() => setGripperAction('idle')}
+              onTouchStart={() => setGripperAction('opening')}
+              onTouchEnd={() => setGripperAction('idle')}
+              className={`flex-1 py-4 rounded-xl font-bold text-sm transition-all active:scale-95 shadow-lg flex flex-col items-center justify-center gap-1
+                ${gripperAction === 'opening' ? 'bg-purple-500 text-white shadow-purple-500/50' : 'bg-gray-800 text-gray-400 border border-gray-700'}`}
+            >
+              <span>CLOSE</span>
+            </button>
+          </div>
+
+        </div>
+
+      </div>
+
+      {/* RIGHT: Arm Joystick */}
+      <div className="flex flex-col items-center justify-center w-1/4">
+        <Joystick
+          label="ARM"
+          color="purple"
+          setVelocity={handleArmJoystick}
+        />
+        <div className="mt-4 text-[10px] text-gray-600 font-mono flex gap-3">
+          <span>B:{Math.round(armBase)}</span>
+          <span>S:{Math.round(displayShoulder)}</span>
+          <span>E:{Math.round(displayElbow)}</span>
         </div>
       </div>
+
     </div>
   );
 }
