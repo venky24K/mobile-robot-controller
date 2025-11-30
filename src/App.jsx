@@ -72,9 +72,10 @@ const Joystick = ({ setVelocity, label, color = "cyan", sticky = false }) => {
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const containerRef = useRef(null);
+  const touchIdRef = useRef(null); // Track specific touch ID
 
   const handleMove = useCallback((clientX, clientY) => {
-    if (!isDragging && !containerRef.current) return; // Only move if dragging or if it's a sticky joystick and we're initiating a click/touch
+    if (!containerRef.current) return;
 
     const rect = containerRef.current.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
@@ -98,18 +99,34 @@ const Joystick = ({ setVelocity, label, color = "cyan", sticky = false }) => {
     const normalizedY = -y / JOYSTICK_RADIUS; // Invert Y
 
     setVelocity(normalizedX, normalizedY);
-  }, [isDragging, setVelocity]);
+  }, [setVelocity]);
 
   const handleDragStart = useCallback((e) => {
     e.preventDefault();
     setIsDragging(true);
-    const clientX = e.clientX || e.touches[0].clientX;
-    const clientY = e.clientY || e.touches[0].clientY;
+    
+    let clientX, clientY;
+    if (e.type === 'touchstart') {
+      const touch = e.changedTouches[0];
+      touchIdRef.current = touch.identifier;
+      clientX = touch.clientX;
+      clientY = touch.clientY;
+    } else {
+      clientX = e.clientX;
+      clientY = e.clientY;
+    }
+    
     handleMove(clientX, clientY);
-
   }, [handleMove]);
 
-  const handleDragEnd = useCallback(() => {
+  const handleDragEnd = useCallback((e) => {
+    // For touch, only end if the ending touch matches our tracked ID
+    if (e.type === 'touchend' || e.type === 'touchcancel') {
+      const touch = Array.from(e.changedTouches).find(t => t.identifier === touchIdRef.current);
+      if (!touch) return; // Not our touch
+      touchIdRef.current = null;
+    }
+
     setIsDragging(false);
     if (!sticky) {
       setPosition({ x: 0, y: 0 });
@@ -119,13 +136,25 @@ const Joystick = ({ setVelocity, label, color = "cyan", sticky = false }) => {
 
   // Global mouse/touch move listeners
   useEffect(() => {
-    const mouseMove = (e) => handleMove(e.clientX, e.clientY);
-    const touchMove = (e) => handleMove(e.touches[0].clientX, e.touches[0].clientY);
+    const mouseMove = (e) => {
+      if (isDragging && touchIdRef.current === null) {
+        handleMove(e.clientX, e.clientY);
+      }
+    };
+
+    const touchMove = (e) => {
+      if (isDragging && touchIdRef.current !== null) {
+        const touch = Array.from(e.changedTouches).find(t => t.identifier === touchIdRef.current);
+        if (touch) {
+          handleMove(touch.clientX, touch.clientY);
+        }
+      }
+    };
 
     if (isDragging) {
       window.addEventListener('mousemove', mouseMove);
       window.addEventListener('mouseup', handleDragEnd);
-      window.addEventListener('touchmove', touchMove);
+      window.addEventListener('touchmove', touchMove, { passive: false });
       window.addEventListener('touchend', handleDragEnd);
       window.addEventListener('touchcancel', handleDragEnd);
     }
@@ -170,6 +199,35 @@ const Joystick = ({ setVelocity, label, color = "cyan", sticky = false }) => {
 
 // --- App Component ---
 export default function App() {
+  // --- Orientation Logic ---
+  const [isPortrait, setIsPortrait] = useState(false);
+
+  useEffect(() => {
+    const checkOrientation = () => {
+      setIsPortrait(window.innerHeight > window.innerWidth);
+    };
+
+    // Initial check
+    checkOrientation();
+
+    // Listen for resize/orientation change
+    window.addEventListener('resize', checkOrientation);
+    window.addEventListener('orientationchange', checkOrientation);
+
+    // Attempt to lock orientation (works mostly in Fullscreen/PWA)
+    if (screen.orientation && screen.orientation.lock) {
+      screen.orientation.lock('landscape').catch(err => {
+        // Expected error on some browsers/devices if not fullscreen
+        console.log("Orientation lock failed (expected if not fullscreen):", err);
+      });
+    }
+
+    return () => {
+      window.removeEventListener('resize', checkOrientation);
+      window.removeEventListener('orientationchange', checkOrientation);
+    };
+  }, []);
+
   // --- Base Controller ---
   const baseBle = useBluetoothController('MecanumRobot');
   const [baseVx, setBaseVx] = useState(0);
@@ -321,6 +379,16 @@ export default function App() {
       </button>
     );
   };
+
+  if (isPortrait) {
+    return (
+      <div className="w-screen h-screen bg-black flex flex-col items-center justify-center text-center p-8 text-white">
+        <RotateCcw className="w-16 h-16 mb-4 animate-spin-slow text-cyan-400" />
+        <h1 className="text-2xl font-bold mb-2">Please Rotate Device</h1>
+        <p className="text-gray-400">This controller is designed for landscape mode.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="w-screen h-screen bg-gray-950 overflow-hidden flex flex-row items-center justify-between px-12 select-none touch-none">
