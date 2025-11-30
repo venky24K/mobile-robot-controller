@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { RotateCcw, RotateCw, Settings, Zap, Bluetooth, BluetoothConnected, BluetoothOff, Gamepad2, Hand } from 'lucide-react';
+import { RotateCcw, RotateCw, Settings, Zap, Bluetooth, BluetoothConnected, BluetoothOff, Gamepad2, Hand, Maximize, Minimize } from 'lucide-react';
 
 // --- BLE Configuration ---
 const SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb";
@@ -104,7 +104,7 @@ const Joystick = ({ setVelocity, label, color = "cyan", sticky = false }) => {
   const handleDragStart = useCallback((e) => {
     e.preventDefault();
     setIsDragging(true);
-    
+
     let clientX, clientY;
     if (e.type === 'touchstart') {
       const touch = e.changedTouches[0];
@@ -115,7 +115,7 @@ const Joystick = ({ setVelocity, label, color = "cyan", sticky = false }) => {
       clientX = e.clientX;
       clientY = e.clientY;
     }
-    
+
     handleMove(clientX, clientY);
   }, [handleMove]);
 
@@ -201,18 +201,25 @@ const Joystick = ({ setVelocity, label, color = "cyan", sticky = false }) => {
 export default function App() {
   // --- Orientation Logic ---
   const [isPortrait, setIsPortrait] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   useEffect(() => {
     const checkOrientation = () => {
       setIsPortrait(window.innerHeight > window.innerWidth);
     };
 
+    const checkFullscreen = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+
     // Initial check
     checkOrientation();
+    checkFullscreen();
 
     // Listen for resize/orientation change
     window.addEventListener('resize', checkOrientation);
     window.addEventListener('orientationchange', checkOrientation);
+    document.addEventListener('fullscreenchange', checkFullscreen);
 
     // Attempt to lock orientation (works mostly in Fullscreen/PWA)
     if (screen.orientation && screen.orientation.lock) {
@@ -225,8 +232,21 @@ export default function App() {
     return () => {
       window.removeEventListener('resize', checkOrientation);
       window.removeEventListener('orientationchange', checkOrientation);
+      document.removeEventListener('fullscreenchange', checkFullscreen);
     };
   }, []);
+
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(err => {
+        console.log(`Error attempting to enable fullscreen: ${err.message}`);
+      });
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      }
+    }
+  };
 
   // --- Base Controller ---
   const baseBle = useBluetoothController('MecanumRobot');
@@ -391,7 +411,7 @@ export default function App() {
   }
 
   return (
-    <div className="w-screen h-screen bg-gray-950 overflow-hidden flex flex-row items-center justify-between px-12 select-none touch-none">
+    <div className="w-screen h-[100dvh] bg-gray-950 overflow-hidden flex flex-row items-center justify-between px-12 select-none touch-none">
 
       {/* LEFT: Base Joystick (Clean) */}
       <div className="flex flex-col items-center justify-center w-1/4">
@@ -429,6 +449,14 @@ export default function App() {
             className={`p-2 rounded-lg transition-all ${armBle.isConnected ? 'bg-purple-600/20 text-purple-400' : 'bg-gray-800 text-gray-500'}`}
           >
             <Hand className="h-5 w-5" />
+          </button>
+
+          {/* Fullscreen Toggle */}
+          <button
+            onClick={toggleFullscreen}
+            className="p-2 rounded-lg bg-gray-800 text-gray-500 hover:text-cyan-400 transition-all"
+          >
+            {isFullscreen ? <Minimize className="h-5 w-5" /> : <Maximize className="h-5 w-5" />}
           </button>
         </div>
 
