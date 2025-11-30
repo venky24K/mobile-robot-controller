@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { RotateCcw, RotateCw, Settings, Zap, Bluetooth, BluetoothConnected, BluetoothOff, Gamepad2, Hand, Maximize, Minimize } from 'lucide-react';
+import { RotateCcw, RotateCw, Settings, Zap, Bluetooth, BluetoothConnected, BluetoothOff, Gamepad2, Hand, Maximize, Minimize, Home } from 'lucide-react';
 
 // --- BLE Configuration ---
 const SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb";
@@ -257,10 +257,24 @@ export default function App() {
   // --- Arm Controller ---
   const armBle = useBluetoothController('MecanumArm');
   const [armBase, setArmBase] = useState(90);
-  const [armExtension, setArmExtension] = useState(0); // 0 = Home (Folded), 100 = Extended (Max)
+  const [armBaseVelocity, setArmBaseVelocity] = useState(0); // -100 to 100
+  const [armShoulder, setArmShoulder] = useState(0);  // Independent Shoulder (Start at 0)
+  const [armElbow, setArmElbow] = useState(180);      // Independent Elbow (Start at 180)
   const [armWrist, setArmWrist] = useState(110);
+  const [armWristVelocity, setArmWristVelocity] = useState(0); // -100 to 100
   const [armGripper, setArmGripper] = useState(110); // 0 = Closed, 180 = Open (approx)
+
   const [gripperAction, setGripperAction] = useState('idle'); // 'idle', 'opening', 'closing'
+  const [isHoming, setIsHoming] = useState(false);
+
+  // Home Positions
+  const HOME_POSITIONS = {
+    base: 90,
+    shoulder: 0,
+    elbow: 180,
+    wrist: 110,
+    gripper: 110
+  };
 
   // Gripper Hold-to-Move Logic
   useEffect(() => {
@@ -279,12 +293,7 @@ export default function App() {
     return () => clearInterval(interval);
   }, [gripperAction]);
 
-  // Derived Angles for Display
-  // Home (0%): Shoulder 0 (UI) -> Servo 180, Elbow 180 (UI) -> Servo 180
-  // Max (100%): Shoulder 70 (UI) -> Servo 110, Elbow 70 (UI) -> Servo 70
-  const displayShoulder = (armExtension / 100) * 70;
-  // Elbow Range: 180 -> 70 (Span of 110 degrees)
-  const displayElbow = 180 - ((armExtension / 100) * 110);
+
 
   // --- Base Logic ---
   useEffect(() => {
@@ -316,59 +325,90 @@ export default function App() {
 
   // Refs for State Access inside Loop (to avoid restarting interval)
   const stateRef = useRef({
-    armBase, armExtension, armWrist, armGripper, armVx, armVy
+    armBase, armBaseVelocity, armShoulder, armElbow, armWrist, armWristVelocity, armGripper, armVx, armVy, isHoming
   });
 
   // Sync Refs with State
   useEffect(() => {
-    stateRef.current = { armBase, armExtension, armWrist, armGripper, armVx, armVy };
-  }, [armBase, armExtension, armWrist, armGripper, armVx, armVy]);
+    stateRef.current = { armBase, armBaseVelocity, armShoulder, armElbow, armWrist, armWristVelocity, armGripper, armVx, armVy, isHoming };
+  }, [armBase, armBaseVelocity, armShoulder, armElbow, armWrist, armWristVelocity, armGripper, armVx, armVy, isHoming]);
 
   // Main Control Loop (Runs once, doesn't restart on state changes)
   useEffect(() => {
     if (!armBle.isConnected) return;
 
     const interval = setInterval(() => {
-      const { armBase, armExtension, armWrist, armGripper, armVx, armVy } = stateRef.current;
+      const { armBase, armBaseVelocity, armShoulder, armElbow, armWrist, armWristVelocity, armGripper, armVx, armVy, isHoming } = stateRef.current;
 
       // Incremental Control with Variable Speed (Exponential Curve)
-      const MAX_SPEED = 8.0;
-      // Extension Speed: 0-100 scale. Let's say max speed is 5 units per tick.
-      const MAX_EXT_SPEED = 5.0;
+      const MAX_SPEED = 5.0;
 
+      // --- HOMING LOGIC ---
+      if (isHoming) {
+        const HOMING_SPEED = 3.0; // Degrees per tick
+        let reachedHome = true;
+
+        // Helper to move towards target
+        const moveTowards = (current, target, speed) => {
+          if (Math.abs(current - target) < speed) return target;
+          reachedHome = false;
+          return current < target ? current + speed : current - speed;
+        };
+
+        setArmBase(prev => moveTowards(prev, HOME_POSITIONS.base, HOMING_SPEED));
+        setArmShoulder(prev => moveTowards(prev, HOME_POSITIONS.shoulder, HOMING_SPEED));
+        setArmElbow(prev => moveTowards(prev, HOME_POSITIONS.elbow, HOMING_SPEED));
+        setArmWrist(prev => moveTowards(prev, HOME_POSITIONS.wrist, HOMING_SPEED));
+        setArmGripper(prev => moveTowards(prev, HOME_POSITIONS.gripper, HOMING_SPEED));
+
+        if (reachedHome) setIsHoming(false);
+
+        // Skip manual control if homing
+        // Send current angles to robot
+        const servoShoulder = 70 - Math.round(armShoulder); // Inverted Output
+        const cmd = `A:${Math.round(armBase)}:${servoShoulder}:${Math.round(armElbow)}:${armWrist}:${armGripper}`;
+        armBle.sendCommand(cmd);
+        return;
+      }
+
+      // --- MANUAL CONTROL ---
+
+      // 1. Base Rotation (Velocity Control)
+      if (Math.abs(armBaseVelocity) > 5) {
+        const baseSpeed = (armBaseVelocity / 100) * MAX_SPEED;
+        setArmBase(prev => Math.max(0, Math.min(180, prev + baseSpeed)));
+      }
+
+      // 2. Wrist Rotation (Velocity Control)
+      if (Math.abs(armWristVelocity) > 5) {
+        const wristSpeed = (armWristVelocity / 100) * MAX_SPEED;
+        setArmWrist(prev => Math.max(0, Math.min(110, prev + wristSpeed)));
+      }
+
+      // 3. Arm Joints (Joystick Control)
       if (Math.abs(armVx) > 0.05 || Math.abs(armVy) > 0.05) {
-        // Base Rotation (X-Axis)
-        const deltaBase = armVx * Math.abs(armVx) * MAX_SPEED;
-        setArmBase(prev => {
-          const next = prev + deltaBase;
-          return Math.max(0, Math.min(180, next));
+        // Joystick X -> Shoulder (0 to 70)
+        // Right (Positive X) -> Increase Angle
+        const deltaShoulder = armVx * Math.abs(armVx) * MAX_SPEED;
+        setArmShoulder(prev => {
+          const next = prev + deltaShoulder;
+          return Math.max(0, Math.min(70, next));
         });
 
-        // Arm Extension (Y-Axis) - Coupled Shoulder & Elbow
-        // Joystick UP (Negative armVy) -> Increase Extension (Move to Target)
-        // Joystick DOWN (Positive armVy) -> Decrease Extension (Move to Home)
-        const deltaExt = -armVy * Math.abs(armVy) * MAX_EXT_SPEED;
-
-        setArmExtension(prev => {
-          const next = prev + deltaExt;
-          return Math.max(0, Math.min(100, next));
+        // Joystick Y -> Elbow (0 to 180)
+        // Up (Negative Y) -> Increase Angle (Lift)
+        const deltaElbow = -armVy * Math.abs(armVy) * MAX_SPEED;
+        setArmElbow(prev => {
+          const next = prev + deltaElbow;
+          return Math.max(0, Math.min(180, next));
         });
       }
 
-      // Calculate Servo Angles from Extension State
-      // 1. Shoulder: 0% -> 0 deg (UI), 100% -> 70 deg (UI)
-      //    Servo Mapping: 180 - UI Angle
-      const uiShoulder = (armExtension / 100) * 70;
-      const servoShoulder = 180 - Math.round(uiShoulder);
-
-      // 2. Elbow: 0% -> 180 deg (UI), 100% -> 70 deg (UI)
-      //    Range: 180 down to 70 (Span = 110)
-      //    Formula: 180 - (Percent * 110)
-      const uiElbow = 180 - ((armExtension / 100) * 110);
-      const servoElbow = Math.round(uiElbow);
-
       // Send current angles to robot
-      const cmd = `A:${Math.round(armBase)}:${servoShoulder}:${servoElbow}:${armWrist}:${armGripper}`;
+      // Note: Check servo mounting direction.
+      // Shoulder Inverted: UI 0 -> Servo 70, UI 70 -> Servo 0
+      const servoShoulder = 70 - Math.round(armShoulder);
+      const cmd = `A:${Math.round(armBase)}:${servoShoulder}:${Math.round(armElbow)}:${armWrist}:${armGripper}`;
       armBle.sendCommand(cmd);
 
     }, 50); // 20Hz update rate
@@ -378,6 +418,7 @@ export default function App() {
 
   // Handle Arm Joystick now sets Velocity, not Angle
   const handleArmJoystick = (x, y) => {
+    if (Math.abs(x) > 0.05 || Math.abs(y) > 0.05) setIsHoming(false); // Cancel Homing
     setArmVx(x);
     setArmVy(y);
   };
@@ -434,6 +475,14 @@ export default function App() {
             <Gamepad2 className="h-5 w-5" />
           </button>
 
+          {/* Home Button */}
+          <button
+            onClick={() => setIsHoming(true)}
+            className={`p-2 rounded-lg transition-all ${isHoming ? 'bg-cyan-600/20 text-cyan-400 animate-pulse' : 'bg-gray-800 text-gray-500 hover:text-cyan-400'}`}
+          >
+            <Home className="h-5 w-5" />
+          </button>
+
           {/* Speed Slider */}
           <div className="flex-1 max-w-[120px] flex items-center gap-2">
             <Zap className="h-3 w-3 text-yellow-500" />
@@ -460,17 +509,37 @@ export default function App() {
           </button>
         </div>
 
-        {/* Middle: Wrist Slider */}
-        <div className="w-full max-w-sm bg-gray-900/50 p-4 rounded-2xl border border-gray-800/50">
-          <div className="flex justify-between text-xs text-gray-400 mb-2 font-mono tracking-wider">
-            <span>WRIST ANGLE</span>
-            <span>{armWrist}°</span>
+        {/* Middle: Base & Wrist Sliders */}
+        <div className="w-full max-w-sm flex flex-col gap-4 bg-gray-900/50 p-4 rounded-2xl border border-gray-800/50">
+          {/* Base Slider (Velocity Control) */}
+          <div>
+            <div className="flex justify-between text-xs text-gray-400 mb-1 font-mono tracking-wider">
+              <span>BASE ROTATION</span>
+              <span>{Math.round(armBase)}°</span>
+            </div>
+            <input
+              type="range" min="-100" max="100" value={armBaseVelocity}
+              onChange={(e) => { setArmBaseVelocity(parseInt(e.target.value)); setIsHoming(false); }}
+              onMouseUp={() => setArmBaseVelocity(0)}
+              onTouchEnd={() => setArmBaseVelocity(0)}
+              className="w-full h-4 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-cyan-400"
+            />
           </div>
-          <input
-            type="range" min="0" max="110" value={armWrist}
-            onChange={(e) => setArmWrist(parseInt(e.target.value))}
-            className="w-full h-6 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-400"
-          />
+
+          {/* Wrist Slider (Velocity Control) */}
+          <div>
+            <div className="flex justify-between text-xs text-gray-400 mb-1 font-mono tracking-wider">
+              <span>WRIST ANGLE</span>
+              <span>{Math.round(armWrist)}°</span>
+            </div>
+            <input
+              type="range" min="-100" max="100" value={armWristVelocity}
+              onChange={(e) => { setArmWristVelocity(parseInt(e.target.value)); setIsHoming(false); }}
+              onMouseUp={() => setArmWristVelocity(0)}
+              onTouchEnd={() => setArmWristVelocity(0)}
+              className="w-full h-4 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-400"
+            />
+          </div>
         </div>
 
         {/* Bottom: Rotation & Gripper */}
@@ -524,9 +593,8 @@ export default function App() {
           setVelocity={handleArmJoystick}
         />
         <div className="mt-4 text-[10px] text-gray-600 font-mono flex gap-3">
-          <span>B:{Math.round(armBase)}</span>
-          <span>S:{Math.round(displayShoulder)}</span>
-          <span>E:{Math.round(displayElbow)}</span>
+          <span>S:{Math.round(armShoulder)}</span>
+          <span>E:{Math.round(armElbow)}</span>
         </div>
       </div>
 

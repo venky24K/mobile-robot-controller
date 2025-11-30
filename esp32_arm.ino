@@ -45,7 +45,7 @@ Servo servoWrist;
 Servo servoGripper;
 
 // Current positions
-int servoPositions[5] = {90, 180, 90, 110, 110};
+int servoPositions[5] = {90, 0, 90, 110, 110};
 
 // --- HELPER FUNCTIONS ---
 
@@ -79,8 +79,8 @@ int readFSR() {
 
 void moveToHome() {
   servoPositions[0] = 90; // Base
-  servoPositions[1] = 180; // Shoulder (Start at 180 for CCW movement)
-  servoPositions[2] = 90; // Elbow
+  servoPositions[1] = 0; // Shoulder (Start at 0 for CW movement)
+  servoPositions[2] = 180; // Elbow (Start at 180)
   servoPositions[3] = 110; // Wrist
   servoPositions[4] = 110; // Gripper
 
@@ -169,11 +169,11 @@ void setup() {
   servoBase.attach(SERVO_BASE, 500, 2500);
 
   servoShoulder.setPeriodHertz(50);
-  servoShoulder.write(servoPositions[1]); // Critical: Write 180 before attach
+  servoShoulder.write(servoPositions[1]); // Critical: Write 0 before attach
   servoShoulder.attach(SERVO_SHOULDER, 500, 2500);
 
   servoElbow.setPeriodHertz(50);
-  servoElbow.write(180); // Start at 180 (Home)
+  servoElbow.write(servoPositions[2]); // Start at 180
   servoElbow.attach(SERVO_ELBOW, 500, 2500);
 
   servoWrist.setPeriodHertz(50);
